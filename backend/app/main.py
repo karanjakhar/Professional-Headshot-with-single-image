@@ -17,13 +17,14 @@ from face_swap.face_swap import single_face_swap
 
 
 from face_seg.model import BiSeNet
-
+from config import FACE_SEG_MODEL_PATH
+from config import UPLOAD_FOLDER
 
 n_classes = 19
 net = BiSeNet(n_classes=n_classes)
 net.cuda()
-save_pth = "/home/ubuntu/kj_learning/professonal_headshot/app/face_seg/79999_iter.pth"
-net.load_state_dict(torch.load(save_pth))
+
+net.load_state_dict(torch.load(FACE_SEG_MODEL_PATH))
 net.eval()
 
 to_tensor = transforms.Compose([
@@ -31,9 +32,7 @@ to_tensor = transforms.Compose([
     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
 ])
 
-# from face_swap.api import router
 
-UPLOAD_FOLDER = "./uploaded_images"
 if not os.path.exists(UPLOAD_FOLDER):
     os.mkdir(UPLOAD_FOLDER)
 
