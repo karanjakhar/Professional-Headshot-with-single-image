@@ -71,7 +71,13 @@ def create_mask(uid):
         cv2.imwrite(mask_location, 255 * (1 - mask_image))
         
 
-
+def make_square(image_path, output_path):
+    with PIL.Image.open(image_path) as img:
+        longer_side = max(img.size)
+        horizontal_padding = (longer_side - img.size[0]) / 2
+        vertical_padding = (longer_side - img.size[1]) / 2
+        padded_image = PIL.ImageOps.expand(img, border=(int(horizontal_padding), int(vertical_padding)), fill='white')
+        padded_image.save(output_path)
 
 
 @app.post('/upload')
@@ -90,6 +96,9 @@ def upload_image(file: UploadFile = File(...)):
 
     with open(image_location, "wb+") as image_object:
         image_object.write(file.file.read()) 
+    
+
+    make_square(image_location, image_location)
     
     create_mask(uid)
 
