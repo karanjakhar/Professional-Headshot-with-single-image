@@ -3,12 +3,14 @@ import React, { useState } from 'react';
 function HeadshotGenerator() {
   const [selectedImage, setSelectedImage] = useState(null);
   const [resultImage, setResultImage] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const handleImageChange = (e) => {
     setSelectedImage(e.target.files[0]);
   };
 
   const handleUploadImage = async () => {
+    setLoading(true);
     const formData = new FormData();
     formData.append('file', selectedImage);
     try {
@@ -17,12 +19,12 @@ function HeadshotGenerator() {
         body: formData,
       });
       const data = await response.json();
-      console.log(response);
-      console.log(data.uid)
       const result_url = 'http://localhost:8000/get_result_image/' + data.uid;
       setResultImage(result_url);
     } catch (error) {
       console.error('Error uploading image:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -43,8 +45,9 @@ function HeadshotGenerator() {
         <button
           onClick={handleUploadImage}
           className="bg-blue-500 text-white py-2 px-4 rounded-lg hover:bg-blue-600"
+          disabled={!selectedImage || loading}
         >
-          Upload Image
+          {loading ? 'Uploading...' : 'Upload Image'}
         </button>
         {resultImage && (
           <div>
