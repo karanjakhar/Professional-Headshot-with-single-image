@@ -5,7 +5,7 @@ import cv2
 import onnx
 import onnxruntime
 import os
-from face_swap.face_align import norm_crop 
+from app.face_swap.face_align import norm_crop 
 
 __all__ = [
     'ArcFaceONNX',

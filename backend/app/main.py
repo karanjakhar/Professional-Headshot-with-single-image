@@ -13,18 +13,19 @@ import torch
 import torchvision.transforms as transforms
 
 from diffusers import StableDiffusionInpaintPipeline
-from face_swap.face_swap import single_face_swap
+from app.face_swap.face_swap import single_face_swap
 
 
-from face_seg.model import BiSeNet
-from config import FACE_SEG_MODEL_PATH
-from config import UPLOAD_FOLDER
+from app.face_seg.model import BiSeNet
+from app.config import FACE_SEG_MODEL_PATH
+from app.config import UPLOAD_FOLDER
+from app.config import DEVICE
 
 n_classes = 19
 net = BiSeNet(n_classes=n_classes)
-net.cuda()
+net = net.to(DEVICE)
 
-net.load_state_dict(torch.load(FACE_SEG_MODEL_PATH))
+net.load_state_dict(torch.load(FACE_SEG_MODEL_PATH, map_location=torch.device(DEVICE)) )
 net.eval()
 
 to_tensor = transforms.Compose([
@@ -51,7 +52,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# app.include_router(router)
+
 def create_mask(uid):
     image_location = os.path.join(UPLOAD_FOLDER, uid, "image.jpg")
     mask_location = os.path.join(UPLOAD_FOLDER, uid, "mask.jpg")
@@ -61,7 +62,7 @@ def create_mask(uid):
         image = img.resize((512, 512), PIL.Image.BILINEAR)
         img = to_tensor(image)
         img = torch.unsqueeze(img, 0)
-        img = img.cuda()
+        img = img.to(DEVICE)
         out = net(img)[0]
         parsing = out.squeeze(0).cpu().numpy().argmax(0)
 
@@ -109,7 +110,7 @@ def upload_image(file: UploadFile = File(...)):
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
     )
-    pipe = pipe.to("cuda")
+    pipe = pipe.to(DEVICE)
 
     prompt = "a person in suit, high resolution, looking towards camera"
     image = pipe(prompt=prompt, image=init_image, mask_image=mask_image).images[0]

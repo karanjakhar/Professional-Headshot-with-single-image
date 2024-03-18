@@ -4,7 +4,7 @@ import cv2
 import onnx
 import os
 from onnx import numpy_helper
-from face_swap import face_align
+from app.face_swap import face_align
 
 
 

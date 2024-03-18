@@ -5,14 +5,14 @@ import onnxruntime
 import os
 
 
-from face_swap.utils.common import Face
-from face_swap.retinaface import RetinaFace 
-from face_swap.arcface_onnx import ArcFaceONNX
-from face_swap.inswapper import INSwapper
-from face_swap.face_enhancer import enhance_face
-from config import UPLOAD_FOLDER
-from config import RETINAFACE_MODEL_PATH, ARCFACE_MODEL_PATH, FACE_SWAPPER_MODEL_PATH, FACE_ENHANCER_MODEL_PATH
-from config import PROVIDERS
+from app.face_swap.utils.common import Face
+from app.face_swap.retinaface import RetinaFace 
+from app.face_swap.arcface_onnx import ArcFaceONNX
+from app.face_swap.inswapper import INSwapper
+from app.face_swap.face_enhancer import enhance_face
+from app.config import UPLOAD_FOLDER
+from app.config import RETINAFACE_MODEL_PATH, ARCFACE_MODEL_PATH, FACE_SWAPPER_MODEL_PATH, FACE_ENHANCER_MODEL_PATH
+from app.config import PROVIDERS
 
 
 retinaface_det_model = RetinaFace(RETINAFACE_MODEL_PATH, providers=PROVIDERS)

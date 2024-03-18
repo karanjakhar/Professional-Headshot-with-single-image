@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
-from face_seg.resnet import Resnet18
+from app.face_seg.resnet import Resnet18
 #from resnet import Resnet18
 # from modules.bn import InPlaceABNSync as BatchNorm2d
 
