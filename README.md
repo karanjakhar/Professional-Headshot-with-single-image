@@ -121,7 +121,7 @@ Install dependencies
   cd Professional-Headshot-with-single-image/frontend
   npm install
 
-  cd Professional-Headshot-with-single-image/backend/app
+  cd Professional-Headshot-with-single-image/backend
   pip install -r requirements.txt
 ```
 
@@ -131,13 +131,20 @@ Run Backend and Frontend
   cd Professional-Headshot-with-single-image/frontend
   npm start
 
-  cd Professional-Headshot-with-single-image/backend/app
-  python3 main.py
+  cd Professional-Headshot-with-single-image/backend
+  python3 -m app.main
 ```
 Model Weights
 
 ```
 Download model weight files from release and place them in weights/ folder.
+```
+
+Run Backend using Docker
+```
+cd Professional-Headshot-with-single-image/backend
+docker build -t proshot:latest .
+docker run --gpus all -p 8000:80 proshot:latest
 ```
 
 
