@@ -28,6 +28,11 @@ net = net.to(DEVICE)
 net.load_state_dict(torch.load(FACE_SEG_MODEL_PATH, map_location=torch.device(DEVICE)) )
 net.eval()
 
+pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
+    )
+pipe = pipe.to(DEVICE)
+
 to_tensor = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
@@ -107,10 +112,7 @@ def upload_image(file: UploadFile = File(...)):
     init_image = PIL.Image.open(image_location)
     mask_image = PIL.Image.open(mask_location)
 
-    pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
-    )
-    pipe = pipe.to(DEVICE)
+    
 
     prompt = "a person in suit, high resolution, looking towards camera"
     image = pipe(prompt=prompt, image=init_image, mask_image=mask_image).images[0]
