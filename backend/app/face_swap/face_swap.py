@@ -1,8 +1,6 @@
-
-import cv2
 import onnxruntime
-
-import os
+import numpy as np
+import PIL
 
 
 from app.face_swap.utils.common import Face
@@ -26,8 +24,7 @@ face_enhancer_model = onnxruntime.InferenceSession(FACE_ENHANCER_MODEL_PATH,prov
 
 
 
-def get_processed_face(img_path):
-    image = cv2.imread(img_path)
+def get_processed_face(image):
     bboxes, kpss = retinaface_det_model.detect(image,max_num=1,metric='default')
     print(bboxes)
     bbox = bboxes[0, 0:4]
@@ -38,17 +35,15 @@ def get_processed_face(img_path):
     return face
 
 
-def single_face_swap(uid):
-    image_location = os.path.join(UPLOAD_FOLDER, uid, "image.jpg")
-    result_location = os.path.join(UPLOAD_FOLDER, uid, "result.jpg")
+def single_face_swap(image, init_image):
 
-    new_face = get_processed_face(image_location)
-    old_face = get_processed_face(result_location)
+    new_face = get_processed_face(np.array(init_image))
+    old_face = get_processed_face(np.array(image))
 
-    frame = cv2.imread(result_location)
+    frame = np.array(image)
 
     frame = face_swapper_model.get(frame, old_face, new_face, paste_back=True)
 
     frame = enhance_face(old_face, frame, face_enhancer_model)
 
-    cv2.imwrite(result_location, frame)
+    return frame

@@ -1,11 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import APIRouter, UploadFile, HTTPException, File
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse
 
 import uuid
 import os
 import numpy as np
+import io
 
 import PIL
 import cv2
@@ -13,6 +14,9 @@ import torch
 import torchvision.transforms as transforms
 
 from diffusers import StableDiffusionInpaintPipeline
+from diffusers import DPMSolverMultistepScheduler
+
+
 from app.face_swap.face_swap import single_face_swap
 
 
@@ -28,10 +32,12 @@ net = net.to(DEVICE)
 net.load_state_dict(torch.load(FACE_SEG_MODEL_PATH, map_location=torch.device(DEVICE)) )
 net.eval()
 
-pipe = StableDiffusionInpaintPipeline.from_pretrained(
+pipeline = StableDiffusionInpaintPipeline.from_pretrained(
         "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
     )
-pipe = pipe.to(DEVICE)
+pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
+pipeline = pipeline.to(DEVICE)
+pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead", fullgraph=True)
 
 to_tensor = transforms.Compose([
     transforms.ToTensor(),
@@ -39,8 +45,6 @@ to_tensor = transforms.Compose([
 ])
 
 
-if not os.path.exists(UPLOAD_FOLDER):
-    os.mkdir(UPLOAD_FOLDER)
 
 app = FastAPI()
 
@@ -58,12 +62,8 @@ app.add_middleware(
 )
 
 
-def create_mask(uid):
-    image_location = os.path.join(UPLOAD_FOLDER, uid, "image.jpg")
-    mask_location = os.path.join(UPLOAD_FOLDER, uid, "mask.jpg")
+def create_mask(img):
     with torch.no_grad():
-        
-        img = PIL.Image.open(image_location)
         image = img.resize((512, 512), PIL.Image.BILINEAR)
         img = to_tensor(image)
         img = torch.unsqueeze(img, 0)
@@ -74,65 +74,56 @@ def create_mask(uid):
         mask_image = np.zeros((512,512))
         mask_image[parsing==1] = 1.0
         mask_image[parsing==17] = 1.0
-        cv2.imwrite(mask_location, 255 * (1 - mask_image))
+        
+    
+
+        print(mask_image.shape)
+
+        mask_image = 255 * (1 - mask_image)
+        mask_image = mask_image.astype(np.uint8)
+        
+        return PIL.Image.fromarray(mask_image)
         
 
-def make_square(image_path, output_path):
-    with PIL.Image.open(image_path) as img:
-        longer_side = max(img.size)
-        horizontal_padding = (longer_side - img.size[0]) / 2
-        vertical_padding = (longer_side - img.size[1]) / 2
-        padded_image = PIL.ImageOps.expand(img, border=(int(horizontal_padding), int(vertical_padding)), fill='white')
-        padded_image.save(output_path)
+def make_square(img):
+    
+    longer_side = max(img.size)
+    horizontal_padding = (longer_side - img.size[0]) / 2
+    vertical_padding = (longer_side - img.size[1]) / 2
+    padded_image = PIL.ImageOps.expand(img, border=(int(horizontal_padding), int(vertical_padding)), fill='white')
+    return padded_image
 
 
 @app.post('/upload')
 def upload_image(file: UploadFile = File(...)):
 
-   
+    # Read the uploaded image file
+    init_image = PIL.Image.open(io.BytesIO(file.file.read()))
 
-    uid = str(uuid.uuid4())
-
-    if not os.path.exists(os.path.join(UPLOAD_FOLDER, uid)):
-        os.mkdir(os.path.join(UPLOAD_FOLDER, uid))
-
-    image_location = os.path.join(UPLOAD_FOLDER, uid, "image.jpg")
-    mask_location = os.path.join(UPLOAD_FOLDER, uid, "mask.jpg")
-    result_location = os.path.join(UPLOAD_FOLDER, uid, "result.jpg")
-
-    with open(image_location, "wb+") as image_object:
-        image_object.write(file.file.read()) 
+    # Convert the image to RGB format if it's RGBA
+    if init_image.mode == 'RGBA':
+        init_image = init_image.convert('RGB')
     
-
-    make_square(image_location, image_location)
+    init_image = make_square(init_image)
     
-    create_mask(uid)
-
-
-    init_image = PIL.Image.open(image_location)
-    mask_image = PIL.Image.open(mask_location)
-
-    
+    mask_image = create_mask(init_image)
 
     prompt = "a person in suit, high resolution, looking towards camera"
-    image = pipe(prompt=prompt, image=init_image, mask_image=mask_image).images[0]
+    
+    image = pipeline(prompt=prompt, image=init_image, mask_image=mask_image, num_inference_steps=20).images[0]
 
-    image.save(result_location)
-    single_face_swap(uid)
+    result_image = single_face_swap(  image, init_image)
 
-    return {"uid":uid}
+    # Convert the numpy array to a PIL Image
+    image = PIL.Image.fromarray(result_image)
 
+    # Save the image to a byte buffer
+    output = io.BytesIO()
+    image.save(output, format="JPEG")
+    output.seek(0)
 
-@app.get('/get_result_image/{uid}')
-def serve_image(uid: str):
-    result_location = os.path.join(UPLOAD_FOLDER, uid, "result.jpg")
-
-    if not os.path.isfile(result_location):
-        raise HTTPException(status_code=404, detail="Image not found.")
-
-    return FileResponse(result_location)
-
-
+    # Return the image as a StreamingResponse
+    return StreamingResponse(output, media_type="image/jpeg")
 
 
 if __name__ == "__main__":
