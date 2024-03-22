@@ -26,7 +26,8 @@ image = Image.debian_slim().apt_install("git").apt_install(
     "insightface==0.7.3",
     "opencv-python",
     "einops",
-    "ip-adapterv==0.1.0"
+    "ip-adapterv==0.1.0",
+    "super-image",
 )
 
 stub = Stub("stable-diffusion-kj-ip", image=image)
@@ -35,7 +36,7 @@ with image.imports():
     import torch
  
     import numpy as np
-    import os
+    import cv2
 
     from diffusers.utils import load_image
     from huggingface_hub import snapshot_download,hf_hub_download
@@ -48,6 +49,7 @@ with image.imports():
     import onnxruntime
     from insightface.utils import face_align
     from ip_adapter.ip_adapter_faceid import  IPAdapterFaceIDPlus
+    from super_image import EdsrModel, ImageLoader
 
 
 @stub.cls(gpu=gpu.A10G(), container_idle_timeout=240)
@@ -69,6 +71,7 @@ class Model:
         snapshot_download("SG161222/Realistic_Vision_V4.0_noVAE", ignore_patterns=ignore)
         snapshot_download("stabilityai/sd-vae-ft-mse", ignore_patterns=ignore)
         snapshot_download("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", ignore_patterns=ignore)
+        snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore)
         
 
     @enter()
@@ -97,16 +100,16 @@ class Model:
             scheduler=self.noise_scheduler,
             vae=self.vae,
         ).to('cuda')
-        from ip_adapter.ip_adapter_faceid import  IPAdapterFaceIDPlus
+        #from ip_adapter.ip_adapter_faceid import  IPAdapterFaceIDPlus
         self.ip_plus_ckpt = hf_hub_download(repo_id="h94/IP-Adapter-FaceID", filename="ip-adapter-faceid-plusv2_sd15.bin", repo_type="model")
         self.face_inswapper_path = hf_hub_download(repo_id="ashleykleynhans/inswapper", filename="inswapper_128.onnx", repo_type="model")
 
         # self.ip_model = IPAdapterFaceID(self.pipe, self.ip_ckpt, 'cuda')
         self.ip_model_plus = IPAdapterFaceIDPlus(self.pipe, self.image_encoder_path, self.ip_plus_ckpt, 'cuda')
 
+        self.PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
-
-        self.face_app = FaceAnalysis(name="buffalo_l", providers=onnxruntime.get_available_providers())
+        self.face_app = FaceAnalysis(name="buffalo_l", providers=self.PROVIDERS)
         self.face_app.prepare(ctx_id=0, det_size=(640, 640))
 
         # os.system(
@@ -114,21 +117,84 @@ class Model:
         #     )
 
         self.face_swapper = insightface.model_zoo.get_model(self.face_inswapper_path,
-                                                            providers=onnxruntime.get_available_providers())
+                                                            providers=self.PROVIDERS)
 
+        self.upscale_model = EdsrModel.from_pretrained('eugenesiow/edsr-base', scale=2)
         
-                
+        self.face_enhancer_path = hf_hub_download(repo_id='Neus/GFPGANv1.4', filename='GFPGANv1.4.onnx', repo_type='model')
+        self.face_enhancer_model = onnxruntime.InferenceSession(self.face_enhancer_path,providers=self.PROVIDERS)
+    
+
+    def blend_frame(self,temp_frame, paste_frame):
+        face_enhancer_blend = 0.5
+        temp_frame = cv2.addWeighted(temp_frame, face_enhancer_blend, paste_frame, 1 - face_enhancer_blend, 0)
+        return temp_frame
+    
+
+    def paste_back(self,temp_frame, crop_frame, affine_matrix ):
+        inverse_affine_matrix = cv2.invertAffineTransform(affine_matrix)
+        temp_frame_height, temp_frame_width = temp_frame.shape[0:2]
+        crop_frame_height, crop_frame_width = crop_frame.shape[0:2]
+        inverse_crop_frame = cv2.warpAffine(crop_frame, inverse_affine_matrix, (temp_frame_width, temp_frame_height))
+        inverse_mask = np.ones((crop_frame_height, crop_frame_width, 3), dtype = np.float32)
+        inverse_mask_frame = cv2.warpAffine(inverse_mask, inverse_affine_matrix, (temp_frame_width, temp_frame_height))
+        inverse_mask_frame = cv2.erode(inverse_mask_frame, np.ones((2, 2)))
+        inverse_mask_border = inverse_mask_frame * inverse_crop_frame
+        inverse_mask_area = np.sum(inverse_mask_frame) // 3
+        inverse_mask_edge = int(inverse_mask_area ** 0.5) // 20
+        inverse_mask_radius = inverse_mask_edge * 2
+        inverse_mask_center = cv2.erode(inverse_mask_frame, np.ones((inverse_mask_radius, inverse_mask_radius)))
+        inverse_mask_blur_size = inverse_mask_edge * 2 + 1
+        inverse_mask_blur_area = cv2.GaussianBlur(inverse_mask_center, (inverse_mask_blur_size, inverse_mask_blur_size), 0)
+        temp_frame = inverse_mask_blur_area * inverse_mask_border + (1 - inverse_mask_blur_area) * temp_frame
+        temp_frame = temp_frame.clip(0, 255).astype(np.uint8)
+        return temp_frame
+    
+
+    def normalize_crop_frame(self,crop_frame):
+        crop_frame = np.clip(crop_frame, -1, 1)
+        crop_frame = (crop_frame + 1) / 2
+        crop_frame = crop_frame.transpose(1, 2, 0)
+        crop_frame = (crop_frame * 255.0).round()
+        crop_frame = crop_frame.astype(np.uint8)[:, :, ::-1]
+        return crop_frame
+    
+    def prepare_crop_frame(self,crop_frame):
+        crop_frame = crop_frame[:, :, ::-1] / 255.0
+        crop_frame = (crop_frame - 0.5) / 0.5
+        crop_frame = np.expand_dims(crop_frame.transpose(2, 0, 1), axis = 0).astype(np.float32)
+        return crop_frame
+    
+    def warp_face(self,target_face,temp_frame):
+        template = np.array(
+        [
+            [ 192.98138, 239.94708 ],
+            [ 318.90277, 240.1936 ],
+            [ 256.63416, 314.01935 ],
+            [ 201.26117, 371.41043 ],
+            [ 313.08905, 371.15118 ]
+        ])
+        affine_matrix = cv2.estimateAffinePartial2D(target_face['kps'], template, method = cv2.LMEDS)[0]
+        crop_frame = cv2.warpAffine(temp_frame, affine_matrix, (512, 512))
+        return crop_frame, affine_matrix
+    
+
+    def enhance_face(self, target_face, temp_frame, face_enhancer_model):
+        frame_processor = face_enhancer_model
+        crop_frame, affine_matrix = self.warp_face(target_face, temp_frame)
+        crop_frame = self.prepare_crop_frame(crop_frame)
+        frame_processor_inputs = {}
+        for frame_processor_input in frame_processor.get_inputs():
+            if frame_processor_input.name == 'input':
+                frame_processor_inputs[frame_processor_input.name] = crop_frame
+            if frame_processor_input.name == 'weight':
+                frame_processor_inputs[frame_processor_input.name] = np.array([ 1 ], dtype = np.double)
         
-        # self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
-        # self.pipe = self.pipe.to("cuda")
-
-        # load models
-        # self.image_processor = SegformerImageProcessor.from_pretrained("jonathandinu/face-parsing")
-        # self.seg_model = SegformerForSemanticSegmentation.from_pretrained("jonathandinu/face-parsing")
-        # self.seg_model.to("cuda")
-        # self.seg_model.eval()
-
-
+        crop_frame = frame_processor.run(None, frame_processor_inputs)[0][0]
+        crop_frame = self.normalize_crop_frame(crop_frame)
+        paste_frame = self.paste_back(temp_frame, crop_frame, affine_matrix)
+        temp_frame = self.blend_frame(temp_frame, paste_frame)
+        return temp_frame
 
     @method()
     def inference(self, image_bytes, prompt):
@@ -139,7 +205,7 @@ class Model:
 
         face_image = face_align.norm_crop(face, landmark=faces[0].kps, image_size=224)
 
-        face_strength = 1.3
+        face_strength = 3
         likeness_strength = 1
         total_negative_prompt = 'naked, bikini, skimpy, scanty, bare skin, lingerie, swimsuit, exposed, see-through'
 
@@ -152,9 +218,22 @@ class Model:
     
         byte_stream = BytesIO()
         output_face = self.face_app.get(np.array(image))[0]
-        result = self.face_swapper.get(np.array(image), output_face, faces[0], paste_back=True)
-        result = result.astype(np.uint8)
-        result = PIL.Image.fromarray(result)
+        face_result = self.face_swapper.get(np.array(image), output_face, faces[0], paste_back=True)
+        target_face = self.face_app.get(face_result)[0]
+        face_result = self.enhance_face(target_face, face_result, self.face_enhancer_model)
+        face_result = face_result.astype(np.uint8)
+        face_result = PIL.Image.fromarray(face_result)
+
+        inputs = ImageLoader.load_image(face_result)
+        preds = self.upscale_model(inputs)
+        pred = preds.data.cpu().numpy()
+        pred[0] = np.clip(pred[0], 0, 255)
+        pred = pred[0].transpose((1, 2, 0)) * 255.0
+
+        pred = pred.astype(np.uint8)
+
+        result = PIL.Image.fromarray(pred)
+        
         result.save(byte_stream, format="JPEG")
         image_bytes = byte_stream.getvalue()
 
