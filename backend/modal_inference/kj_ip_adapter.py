@@ -71,7 +71,13 @@ class Model:
         snapshot_download("SG161222/Realistic_Vision_V4.0_noVAE", ignore_patterns=ignore)
         snapshot_download("stabilityai/sd-vae-ft-mse", ignore_patterns=ignore)
         snapshot_download("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", ignore_patterns=ignore)
-        snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore)
+        snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore) #local_dir="./checkpoints"
+        hf_hub_download(repo_id="h94/IP-Adapter-FaceID", filename="ip-adapter-faceid-plusv2_sd15.bin", repo_type="model", local_dir="/root/checkpoints")
+        hf_hub_download(repo_id="ashleykleynhans/inswapper", filename="inswapper_128.onnx", repo_type="model", local_dir="/root/checkpoints")
+        hf_hub_download(repo_id='Neus/GFPGANv1.4', filename='GFPGANv1.4.onnx', repo_type='model', local_dir="/root/checkpoints")
+        
+        snapshot_download(repo_id="karanjakhar/insightface_weights", local_dir="/root/.insightface/models/buffalo_l")
+
         
 
     @enter()
@@ -101,8 +107,8 @@ class Model:
             vae=self.vae,
         ).to('cuda')
         #from ip_adapter.ip_adapter_faceid import  IPAdapterFaceIDPlus
-        self.ip_plus_ckpt = hf_hub_download(repo_id="h94/IP-Adapter-FaceID", filename="ip-adapter-faceid-plusv2_sd15.bin", repo_type="model")
-        self.face_inswapper_path = hf_hub_download(repo_id="ashleykleynhans/inswapper", filename="inswapper_128.onnx", repo_type="model")
+        self.ip_plus_ckpt = "/root/checkpoints/ip-adapter-faceid-plusv2_sd15.bin"
+        self.face_inswapper_path = "/root/checkpoints/inswapper_128.onnx"
 
         # self.ip_model = IPAdapterFaceID(self.pipe, self.ip_ckpt, 'cuda')
         self.ip_model_plus = IPAdapterFaceIDPlus(self.pipe, self.image_encoder_path, self.ip_plus_ckpt, 'cuda')
@@ -121,7 +127,7 @@ class Model:
 
         self.upscale_model = EdsrModel.from_pretrained('eugenesiow/edsr-base', scale=2)
         
-        self.face_enhancer_path = hf_hub_download(repo_id='Neus/GFPGANv1.4', filename='GFPGANv1.4.onnx', repo_type='model')
+        self.face_enhancer_path = '/root/checkpoints/GFPGANv1.4.onnx'
         self.face_enhancer_model = onnxruntime.InferenceSession(self.face_enhancer_path,providers=self.PROVIDERS)
     
 
@@ -246,7 +252,7 @@ DEFAULT_IMAGE_PATH = "/home/karan/kj_workspace/kj_ai/Professional-Headshot-with-
 @stub.local_entrypoint()
 def main(
     image_path=DEFAULT_IMAGE_PATH,
-    prompt="a person in suit, high resolution, looking towards camera",
+    prompt="a person in suit, high resolution, looking towards camera, ((create a profilpicture))",
 ):
     with open(image_path, "rb") as image_file:
         input_image_bytes = image_file.read()
@@ -285,7 +291,7 @@ def app():
 
         # Read the uploaded image file
         input_image_bytes = file.file.read()
-        prompt = "a person in suit, high resolution, looking towards camera"
+        prompt = "a person in suit, high resolution, looking towards camera, ((create a profilpicture))"
 
         output_image_bytes = Model().inference.remote(input_image_bytes, prompt)
 
