@@ -14,7 +14,10 @@ from modal import (
     web_endpoint,
 )
 
-image = Image.debian_slim().pip_install(
+image = Image.debian_slim().apt_install("git").apt_install(
+        "libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1"
+    ).pip_install('onnxruntime-gpu', extra_index_url="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/").pip_install(
+    "opencv-python",
     "Pillow~=10.1.0",
     "diffusers~=0.24.0",
     "transformers~=4.35.2",  # This is needed for `import torch`
@@ -28,6 +31,7 @@ with image.imports():
     import torch
     from torch import nn
     import numpy as np
+    import cv2
     from diffusers import StableDiffusionInpaintPipeline
     from diffusers import DPMSolverMultistepScheduler
     from diffusers.utils import load_image
@@ -95,16 +99,46 @@ class Model:
         mask_image[parsing==18] = 1.0
         mask_image[parsing==17] = 1.0
 
-        mask_image = 255 *  mask_image
+        mask_image = mask_image
+
+        mask_area = np.sum(mask_image)
+        
+        # mask_area_ratio > 0.4 then add padding around the image and resize to 512.
+        total_area = np.prod(mask_image.shape)
+
+        mask_area_ratio = mask_area / total_area
+
+        if mask_area_ratio > 0.3:
+            # Add padding around the image
+            pad = int(((mask_area_ratio * 400) - 100) * 5.12)//2
+            mask_image = np.pad(mask_image, ((pad, pad), (pad, pad)), mode='constant',constant_values=(1))
+            mask_image = cv2.resize(mask_image, (512, 512), interpolation=cv2.INTER_AREA)
+            init_image = PIL.ImageOps.expand(init_image, border=(pad, pad), fill='white')
+            init_image = init_image.resize((512, 512))
+
+        # Define the kernel size for erosion
+        #kernel_size = 15  # You can adjust this value to control the amount of erosion
+
+        # Define the kernel
+        
+        #kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        
+        # Apply erosion to the mask_image
+        #eroded_mask = cv2.erode(mask_image, kernel, iterations=1)
+
+        #eroded_mask = 255 *  eroded_mask
+        #eroded_mask = eroded_mask.astype(np.uint8)
+
+        mask_image = 255 * mask_image
         mask_image = mask_image.astype(np.uint8)
 
         mask = PIL.Image.fromarray(mask_image)
 
         num_inference_steps = 20
-        strength = 0.9
+        #strength = 0.9
         # "When using SDXL-Turbo for image-to-image generation, make sure that num_inference_steps * strength is larger or equal to 1"
         # See: https://huggingface.co/stabilityai/sdxl-turbo
-        assert num_inference_steps * strength >= 1
+        #assert num_inference_steps * strength >= 1
         image = self.pipe(
             prompt,
             image=init_image,
@@ -114,6 +148,8 @@ class Model:
             # guidance_scale=0.0,
         ).images[0]
 
+
+
         byte_stream = BytesIO()
         image.save(byte_stream, format="JPEG")
         image_bytes = byte_stream.getvalue()
@@ -121,13 +157,13 @@ class Model:
         return image_bytes
 
 
-DEFAULT_IMAGE_PATH = Path(__file__).parent / "demo_images/dog.png"
+DEFAULT_IMAGE_PATH = "/home/karan/kj_workspace/kj_ai/Professional-Headshot-with-single-image/backend/modal_inference/akhil.png"
 
 
 @stub.local_entrypoint()
 def main(
     image_path=DEFAULT_IMAGE_PATH,
-    prompt="a person in suit, high resolution, looking towards camera",
+    prompt="a person in suit, high resolution, looking towards camera, white wall background",
 ):
     with open(image_path, "rb") as image_file:
         input_image_bytes = image_file.read()
@@ -166,7 +202,7 @@ def app():
 
         # Read the uploaded image file
         input_image_bytes = file.file.read()
-        prompt = "a person in suit, high resolution, looking towards camera"
+        prompt = "a person in suit, high resolution, looking towards camera, white wall background"
 
         output_image_bytes = Model().inference.remote(input_image_bytes, prompt)
 
