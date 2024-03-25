@@ -319,9 +319,19 @@ def app():
 
     from fastapi import FastAPI, UploadFile, File
     from fastapi.responses import StreamingResponse
+    from fastapi.middleware.cors import CORSMiddleware
     
 
     web_app = FastAPI()
+
+    # Allow requests from all origins
+    web_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @web_app.post('/upload')
     async def upload_image(file: UploadFile = File(...)):
