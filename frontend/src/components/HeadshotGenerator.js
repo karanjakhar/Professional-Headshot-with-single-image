@@ -14,13 +14,14 @@ function HeadshotGenerator() {
     const formData = new FormData();
     formData.append('file', selectedImage);
     try {
-      const response = await fetch('http://localhost:8000/upload', {
+      const response = await fetch('https://karanjakhar--stable-diffusion-xl-turbo-app.modal.run/upload', {
         method: 'POST',
         body: formData,
       });
+      console.log('Success:', response);
       const data = await response.json();
-      const result_url = 'http://localhost:8000/get_result_image/' + data.uid;
-      setResultImage(result_url);
+      console.log('Success:', data);
+      setResultImage(data);
     } catch (error) {
       console.error('Error uploading image:', error);
     } finally {
@@ -29,9 +30,9 @@ function HeadshotGenerator() {
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
-      <h1 className="text-3xl font-semibold mb-8">Professional Headshot Generator</h1>
-      <div className="w-full max-w-lg bg-white p-8 rounded-lg shadow-lg mb-8">
+    <div className="flex flex-col items-center justify-center mx-6 bg-white">
+      <h1 className="text-3xl font-semibold mb-8">Select and upload</h1>
+      <div className=" bg-white p-8 rounded-lg shadow-lg mb-8">
         <input
           type="file"
           accept="image/*"
@@ -40,11 +41,11 @@ function HeadshotGenerator() {
           name="file"
         />
         {selectedImage && (
-          <img src={URL.createObjectURL(selectedImage)} alt="Selected" className="mb-4 rounded-lg" />
+          <img src={URL.createObjectURL(selectedImage)} alt="Selected" width={200} className="mb-4 rounded-lg" />
         )}
         <button
           onClick={handleUploadImage}
-          className="bg-blue-500 text-white py-2 px-4 rounded-lg hover:bg-blue-600"
+          className="bg-red-500 text-white py-2 px-4 rounded-lg hover:bg-red-400"
           disabled={!selectedImage || loading}
         >
           {loading ? 'Uploading...' : 'Upload Image'}
@@ -52,7 +53,7 @@ function HeadshotGenerator() {
         {resultImage && (
           <div>
             <h2 className="text-xl font-semibold mt-4">Result Image:</h2>
-            <img src={resultImage} alt="Result" className="mt-2 rounded-lg" />
+            <img src={resultImage} alt="Result" width={200} className="mt-2 rounded-lg" />
           </div>
         )}
       </div>
