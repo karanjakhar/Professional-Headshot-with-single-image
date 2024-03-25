@@ -1,5 +1,4 @@
 import './App.css';
-import HeadshotGenerator from './components/HeadshotGenerator';
 import Navbar from './components/Navbar';
 import { BrowserRouter } from 'react-router-dom';
 import Footer from './components/Footer';
