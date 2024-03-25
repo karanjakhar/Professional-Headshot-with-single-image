@@ -18,6 +18,8 @@ image = Image.debian_slim().apt_install("git").apt_install(
         "libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1"
     ).pip_install('onnxruntime-gpu', extra_index_url="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/").pip_install(
     "opencv-python",
+    "insightface==0.7.3",
+    "super-image",
     "Pillow~=10.1.0",
     "diffusers~=0.24.0",
     "transformers~=4.35.2",  # This is needed for `import torch`
@@ -35,9 +37,13 @@ with image.imports():
     from diffusers import StableDiffusionInpaintPipeline
     from diffusers import DPMSolverMultistepScheduler
     from diffusers.utils import load_image
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import snapshot_download, hf_hub_download
     import PIL
     from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+    from super_image import EdsrModel, ImageLoader
+    from insightface.app import FaceAnalysis
+    import insightface
+    import onnxruntime
 
 @stub.cls(gpu=gpu.T4(), container_idle_timeout=240)
 class Model:
@@ -52,6 +58,13 @@ class Model:
 
         snapshot_download("runwayml/stable-diffusion-inpainting", ignore_patterns=ignore)
         snapshot_download("jonathandinu/face-parsing", ignore_patterns=ignore)
+
+        snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore)
+
+        hf_hub_download(repo_id="ashleykleynhans/inswapper", filename="inswapper_128.onnx", repo_type="model", local_dir="/root/checkpoints")
+        hf_hub_download(repo_id='Neus/GFPGANv1.4', filename='GFPGANv1.4.onnx', repo_type='model', local_dir="/root/checkpoints")
+        snapshot_download(repo_id="karanjakhar/insightface_weights", local_dir="/root/.insightface/models/buffalo_l")
+
 
     @enter()
     def enter(self):
@@ -68,6 +81,94 @@ class Model:
         self.seg_model.to("cuda")
         self.seg_model.eval()
 
+        self.PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+
+        self.face_app = FaceAnalysis(name="buffalo_l", providers=self.PROVIDERS)
+        self.face_app.prepare(ctx_id=0, det_size=(640, 640))
+
+        self.face_inswapper_path = "/root/checkpoints/inswapper_128.onnx"
+
+        self.face_swapper = insightface.model_zoo.get_model(self.face_inswapper_path,
+                                                            providers=self.PROVIDERS)
+
+        self.upscale_model = EdsrModel.from_pretrained('eugenesiow/edsr-base', scale=2)
+
+        self.face_enhancer_path = '/root/checkpoints/GFPGANv1.4.onnx'
+        self.face_enhancer_model = onnxruntime.InferenceSession(self.face_enhancer_path,providers=self.PROVIDERS)
+
+    def blend_frame(self,temp_frame, paste_frame):
+        face_enhancer_blend = 0
+        temp_frame = cv2.addWeighted(temp_frame, face_enhancer_blend, paste_frame, 1 - face_enhancer_blend, 0)
+        return temp_frame
+    
+
+    def paste_back(self,temp_frame, crop_frame, affine_matrix ):
+        inverse_affine_matrix = cv2.invertAffineTransform(affine_matrix)
+        temp_frame_height, temp_frame_width = temp_frame.shape[0:2]
+        crop_frame_height, crop_frame_width = crop_frame.shape[0:2]
+        inverse_crop_frame = cv2.warpAffine(crop_frame, inverse_affine_matrix, (temp_frame_width, temp_frame_height))
+        inverse_mask = np.ones((crop_frame_height, crop_frame_width, 3), dtype = np.float32)
+        inverse_mask_frame = cv2.warpAffine(inverse_mask, inverse_affine_matrix, (temp_frame_width, temp_frame_height))
+        inverse_mask_frame = cv2.erode(inverse_mask_frame, np.ones((2, 2)))
+        inverse_mask_border = inverse_mask_frame * inverse_crop_frame
+        inverse_mask_area = np.sum(inverse_mask_frame) // 3
+        inverse_mask_edge = int(inverse_mask_area ** 0.5) // 20
+        inverse_mask_radius = inverse_mask_edge * 2
+        inverse_mask_center = cv2.erode(inverse_mask_frame, np.ones((inverse_mask_radius, inverse_mask_radius)))
+        inverse_mask_blur_size = inverse_mask_edge * 2 + 1
+        inverse_mask_blur_area = cv2.GaussianBlur(inverse_mask_center, (inverse_mask_blur_size, inverse_mask_blur_size), 0)
+        temp_frame = inverse_mask_blur_area * inverse_mask_border + (1 - inverse_mask_blur_area) * temp_frame
+        temp_frame = temp_frame.clip(0, 255).astype(np.uint8)
+        return temp_frame
+    
+
+    def normalize_crop_frame(self,crop_frame):
+        crop_frame = np.clip(crop_frame, -1, 1)
+        crop_frame = (crop_frame + 1) / 2
+        crop_frame = crop_frame.transpose(1, 2, 0)
+        crop_frame = (crop_frame * 255.0).round()
+        crop_frame = crop_frame.astype(np.uint8)[:, :, ::-1]
+        return crop_frame
+    
+    def prepare_crop_frame(self,crop_frame):
+        crop_frame = crop_frame[:, :, ::-1] / 255.0
+        crop_frame = (crop_frame - 0.5) / 0.5
+        crop_frame = np.expand_dims(crop_frame.transpose(2, 0, 1), axis = 0).astype(np.float32)
+        return crop_frame
+    
+    def warp_face(self,target_face,temp_frame):
+        template = np.array(
+        [
+            [ 192.98138, 239.94708 ],
+            [ 318.90277, 240.1936 ],
+            [ 256.63416, 314.01935 ],
+            [ 201.26117, 371.41043 ],
+            [ 313.08905, 371.15118 ]
+        ])
+        affine_matrix = cv2.estimateAffinePartial2D(target_face['kps'], template, method = cv2.LMEDS)[0]
+        crop_frame = cv2.warpAffine(temp_frame, affine_matrix, (512, 512))
+        return crop_frame, affine_matrix
+    
+
+    def enhance_face(self, target_face, temp_frame, face_enhancer_model):
+        frame_processor = face_enhancer_model
+        crop_frame, affine_matrix = self.warp_face(target_face, temp_frame)
+        crop_frame = self.prepare_crop_frame(crop_frame)
+        frame_processor_inputs = {}
+        for frame_processor_input in frame_processor.get_inputs():
+            if frame_processor_input.name == 'input':
+                frame_processor_inputs[frame_processor_input.name] = crop_frame
+            if frame_processor_input.name == 'weight':
+                frame_processor_inputs[frame_processor_input.name] = np.array([ 1 ], dtype = np.double)
+        
+        crop_frame = frame_processor.run(None, frame_processor_inputs)[0][0]
+        crop_frame = self.normalize_crop_frame(crop_frame)
+        paste_frame = self.paste_back(temp_frame, crop_frame, affine_matrix)
+        temp_frame = self.blend_frame(temp_frame, paste_frame)
+        return temp_frame
+
+
+
 
 
     @method()
@@ -77,6 +178,7 @@ class Model:
         horizontal_padding = (longer_side - temp_init_image.size[0]) / 2
         vertical_padding = (longer_side - temp_init_image.size[1]) / 2
         init_image = PIL.ImageOps.expand(temp_init_image, border=(int(horizontal_padding), int(vertical_padding)), fill='white')
+        init_image = init_image.resize((512,512))
 
         # run face seg inference on image
         inputs = self.image_processor(images=init_image, return_tensors="pt").to('cuda')
@@ -101,14 +203,14 @@ class Model:
 
         mask_image = mask_image
 
-        mask_area = np.sum(mask_image)
+        mask_area = np.sum(1-mask_image)
         
         # mask_area_ratio > 0.4 then add padding around the image and resize to 512.
         total_area = np.prod(mask_image.shape)
 
         mask_area_ratio = mask_area / total_area
 
-        if mask_area_ratio > 0.3:
+        if mask_area_ratio > 0.4:
             # Add padding around the image
             pad = int(((mask_area_ratio * 400) - 100) * 5.12)//2
             mask_image = np.pad(mask_image, ((pad, pad), (pad, pad)), mode='constant',constant_values=(1))
@@ -148,10 +250,34 @@ class Model:
             # guidance_scale=0.0,
         ).images[0]
 
+        # face swap
+        output = np.array(image)
+        source_face = self.face_app.get(np.array(init_image))[0]
+        output_face = self.face_app.get(output)[0]
+        face_result = self.face_swapper.get(output, output_face, source_face, paste_back=True)
+        
 
+
+        # face enhancer
+        target_face = self.face_app.get(face_result)[0]
+        face_result = self.enhance_face(target_face, face_result, self.face_enhancer_model)
+        face_result = face_result.astype(np.uint8)
+        face_result = PIL.Image.fromarray(face_result)
+
+
+        # upscale
+        inputs = ImageLoader.load_image(face_result)
+        preds = self.upscale_model(inputs)
+        pred = preds.data.cpu().numpy()
+        pred[0] = np.clip(pred[0], 0, 255)
+        pred = pred[0].transpose((1, 2, 0)) * 255.0
+
+        pred = pred.astype(np.uint8)
+
+        result = PIL.Image.fromarray(pred)
 
         byte_stream = BytesIO()
-        image.save(byte_stream, format="JPEG")
+        result.save(byte_stream, format="JPEG")
         image_bytes = byte_stream.getvalue()
 
         return image_bytes
