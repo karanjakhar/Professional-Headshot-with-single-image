@@ -18,10 +18,10 @@ function HeadshotGenerator() {
         method: 'POST',
         body: formData,
       });
-      console.log('Success:', response);
-      const data = await response.json();
-      console.log('Success:', data);
-      setResultImage(data);
+      const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+  
+      setResultImage(url);
     } catch (error) {
       console.error('Error uploading image:', error);
     } finally {
