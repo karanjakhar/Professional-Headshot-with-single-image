@@ -14,7 +14,7 @@ function HeadshotGenerator() {
     const formData = new FormData();
     formData.append('file', selectedImage);
     try {
-      const response = await fetch('https://karanjakhar--stable-diffusion-xl-turbo-app.modal.run/upload', {
+      const response = await fetch('https://karanjakhar--professional-headshot-single-image-app.modal.run/upload', {
         method: 'POST',
         body: formData,
       });
