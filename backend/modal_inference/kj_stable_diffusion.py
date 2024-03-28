@@ -4,22 +4,23 @@ from pathlib import Path
 
 from modal import (
     Image,
-    Mount,
     Stub,
     asgi_app,
     build,
     enter,
     gpu,
     method,
-    web_endpoint,
 )
 
 image = Image.debian_slim().apt_install("git").apt_install(
         "libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1"
     ).pip_install('onnxruntime-gpu', extra_index_url="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/").pip_install(
     "opencv-python",
+    "basicsr>=1.4.2",
+    "facexlib>=0.2.5",
+    "realesrgan",
+    "gfpgan==1.3.8",
     "insightface==0.7.3",
-    "super-image",
     "Pillow~=10.1.0",
     "diffusers~=0.24.0",
     "transformers~=4.35.2",  # This is needed for `import torch`
@@ -40,12 +41,28 @@ with image.imports():
     from huggingface_hub import snapshot_download, hf_hub_download
     import PIL
     from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
-    from super_image import EdsrModel, ImageLoader
+    #from super_image import EdsrModel, ImageLoader
     from insightface.app import FaceAnalysis
     import insightface
-    import onnxruntime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from realesrgan import RealESRGANer
+    from gfpgan import GFPGANer
 
-@stub.cls(gpu=gpu.T4(), container_idle_timeout=240)
+
+def load_models_concurrently(load_functions_map: dict) -> dict:
+    model_id_to_model = {}
+    with ThreadPoolExecutor(max_workers=len(load_functions_map)) as executor:
+        future_to_model_id = {
+            executor.submit(load_fn): model_id
+            for model_id, load_fn in load_functions_map.items()
+        }
+        for future in as_completed(future_to_model_id.keys()):
+            model_id_to_model[future_to_model_id[future]] = future.result()
+    return model_id_to_model
+
+
+@stub.cls(gpu=gpu.T4(), container_idle_timeout=1200)
 class Model:
     @build()
     def download_models(self):
@@ -59,45 +76,70 @@ class Model:
         snapshot_download("runwayml/stable-diffusion-inpainting", ignore_patterns=ignore)
         snapshot_download("jonathandinu/face-parsing", ignore_patterns=ignore)
 
-        snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore)
+        #snapshot_download("eugenesiow/edsr-base", ignore_patterns=ignore)
 
         hf_hub_download(repo_id="ashleykleynhans/inswapper", filename="inswapper_128.onnx", repo_type="model", local_dir="/root/checkpoints")
         hf_hub_download(repo_id='Neus/GFPGANv1.4', filename='GFPGANv1.4.onnx', repo_type='model', local_dir="/root/checkpoints")
+        hf_hub_download(repo_id="dtarnow/UPscaler", filename="RealESRGAN_x2plus.pth", repo_type="model", local_dir="/root/checkpoints")
+        #hf_hub_download(repo_id="karanjakhar/codeformer", filename="codeformer.onnx", repo_type="model", local_dir="/root/checkpoints")
         snapshot_download(repo_id="karanjakhar/insightface_weights", local_dir="/root/.insightface/models/buffalo_l")
 
+    
 
     @enter()
     def enter(self):
-        self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
-        )
-        
+
+        self.PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        self.face_inswapper_path = "/root/checkpoints/inswapper_128.onnx"
+        self.face_enhancer_path = '/root/checkpoints/GFPGANv1.4.onnx'
+        arch = 'clean'
+        channel_multiplier = 2
+        model_name = 'GFPGANv1.4'
+
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        self.bg_upsampler = RealESRGANer(
+                scale=2,
+                model_path='/root/checkpoints/RealESRGAN_x2plus.pth',
+                model=model,
+                tile=400,
+                tile_pad=10,
+                pre_pad=0,
+                half=True
+                )  
+
+        self.components = load_models_concurrently({
+            "pipe": lambda: StableDiffusionInpaintPipeline.from_pretrained("runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16),
+            "image_processor": lambda: SegformerImageProcessor.from_pretrained("jonathandinu/face-parsing"),
+            "seg_model": lambda: SegformerForSemanticSegmentation.from_pretrained("jonathandinu/face-parsing"),
+            #"upscale_model": lambda: EdsrModel.from_pretrained("eugenesiow/edsr-base", scale=2),
+            "face_app": lambda: FaceAnalysis(name="buffalo_l", providers=self.PROVIDERS),
+            "face_swapper": lambda: insightface.model_zoo.get_model(self.face_inswapper_path,providers=self.PROVIDERS),
+            #"face_enhancer_model": lambda: onnxruntime.InferenceSession(self.face_enhancer_path,providers=self.PROVIDERS),
+            "face_enhancer_model": lambda: GFPGANer(model_path=self.face_enhancer_path, upscale=2, arch=arch, channel_multiplier=channel_multiplier, bg_upsampler=self.bg_upsampler, device="cuda"),
+        })
+
+
+        self.pipe = self.components["pipe"]
+        self.seg_model = self.components["seg_model"]
+        self.face_app = self.components["face_app"]
+        self.face_swapper = self.components["face_swapper"]
+        #self.upscale_model = self.components["upscale_model"]
+        self.face_enhancer_model = self.components["face_enhancer_model"]
+        self.image_processor = self.components["image_processor"]
+
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
         self.pipe = self.pipe.to("cuda")
 
-        # load models
-        self.image_processor = SegformerImageProcessor.from_pretrained("jonathandinu/face-parsing")
-        self.seg_model = SegformerForSemanticSegmentation.from_pretrained("jonathandinu/face-parsing")
-        self.seg_model.to("cuda")
+        self.seg_model = self.seg_model.to("cuda")
         self.seg_model.eval()
 
-        self.PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-
-        self.face_app = FaceAnalysis(name="buffalo_l", providers=self.PROVIDERS)
         self.face_app.prepare(ctx_id=0, det_size=(640, 640))
 
-        self.face_inswapper_path = "/root/checkpoints/inswapper_128.onnx"
+        
 
-        self.face_swapper = insightface.model_zoo.get_model(self.face_inswapper_path,
-                                                            providers=self.PROVIDERS)
-
-        self.upscale_model = EdsrModel.from_pretrained('eugenesiow/edsr-base', scale=2)
-
-        self.face_enhancer_path = '/root/checkpoints/GFPGANv1.4.onnx'
-        self.face_enhancer_model = onnxruntime.InferenceSession(self.face_enhancer_path,providers=self.PROVIDERS)
 
     def blend_frame(self,temp_frame, paste_frame):
-        face_enhancer_blend = 0
+        face_enhancer_blend = 0.4
         temp_frame = cv2.addWeighted(temp_frame, face_enhancer_blend, paste_frame, 1 - face_enhancer_blend, 0)
         return temp_frame
     
@@ -150,25 +192,39 @@ class Model:
         return crop_frame, affine_matrix
     
 
-    def enhance_face(self, target_face, temp_frame, face_enhancer_model):
-        frame_processor = face_enhancer_model
-        crop_frame, affine_matrix = self.warp_face(target_face, temp_frame)
-        crop_frame = self.prepare_crop_frame(crop_frame)
-        frame_processor_inputs = {}
-        for frame_processor_input in frame_processor.get_inputs():
-            if frame_processor_input.name == 'input':
-                frame_processor_inputs[frame_processor_input.name] = crop_frame
-            if frame_processor_input.name == 'weight':
-                frame_processor_inputs[frame_processor_input.name] = np.array([ 1 ], dtype = np.double)
+    # def enhance_face(self, target_face, temp_frame, face_enhancer_model):
+    #     frame_processor = face_enhancer_model
+    #     # crop_frame, affine_matrix = self.warp_face(target_face, temp_frame)
+    #     input_frame = self.prepare_crop_frame(temp_frame)
+    #     frame_processor_inputs = {}
+    #     for frame_processor_input in frame_processor.get_inputs():
+    #         if frame_processor_input.name == 'input':
+    #             frame_processor_inputs[frame_processor_input.name] = input_frame
+    #         if frame_processor_input.name == 'weight':
+    #             frame_processor_inputs[frame_processor_input.name] = np.array([ 1 ], dtype = np.double)
         
-        crop_frame = frame_processor.run(None, frame_processor_inputs)[0][0]
-        crop_frame = self.normalize_crop_frame(crop_frame)
-        paste_frame = self.paste_back(temp_frame, crop_frame, affine_matrix)
-        temp_frame = self.blend_frame(temp_frame, paste_frame)
+    #     result_frame = frame_processor.run(None, frame_processor_inputs)[0][0]
+    #     result_frame = self.normalize_crop_frame(result_frame)
+    #     #temp_frame = self.normalize_crop_frame(temp_frame)
+    #     #paste_frame = self.paste_back(temp_frame, crop_frame, affine_matrix)
+    #     temp_frame = self.blend_frame(temp_frame, result_frame)
+    #     return temp_frame
+
+    def enhance_face(self,target_face, temp_frame):
+        start_x, start_y, end_x, end_y = map(int, target_face['bbox'])
+        padding_x = int((end_x - start_x) * 0.5)
+        padding_y = int((end_y - start_y) * 0.5)
+        start_x = max(0, start_x - padding_x)
+        start_y = max(0, start_y - padding_y)
+        end_x = max(0, end_x + padding_x)
+        end_y = max(0, end_y + padding_y)
+        temp_face = temp_frame[start_y:end_y, start_x:end_x]
+        _, _, temp_face = self.face_enhancer_model.enhance(
+                    temp_face,
+                    paste_back=True
+                )
+        temp_frame[start_y:end_y, start_x:end_x] = temp_face
         return temp_frame
-
-
-
 
 
     @method()
@@ -219,46 +275,42 @@ class Model:
             init_image = init_image.resize((512, 512))
 
         # Define the kernel size for erosion
-        #kernel_size = 15  # You can adjust this value to control the amount of erosion
+        kernel_size = 5  # You can adjust this value to control the amount of erosion
 
         # Define the kernel
         
-        #kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         
         # Apply erosion to the mask_image
-        #eroded_mask = cv2.erode(mask_image, kernel, iterations=1)
+        eroded_mask = cv2.erode(1-mask_image, kernel, iterations=1)
 
-        #eroded_mask = 255 *  eroded_mask
-        #eroded_mask = eroded_mask.astype(np.uint8)
+        eroded_mask = 255 *  (1-eroded_mask)
+        eroded_mask = eroded_mask.astype(np.uint8)
 
-        mask_image = 255 * mask_image
-        mask_image = mask_image.astype(np.uint8)
+        #mask_image = 255 * mask_image
+        #mask_image = mask_image.astype(np.uint8)
 
-        mask = PIL.Image.fromarray(mask_image)
+        mask = PIL.Image.fromarray(eroded_mask)
 
         num_inference_steps = 20
-        #strength = 0.9
-        # "When using SDXL-Turbo for image-to-image generation, make sure that num_inference_steps * strength is larger or equal to 1"
-        # See: https://huggingface.co/stabilityai/sdxl-turbo
-        #assert num_inference_steps * strength >= 1
+      
         image = self.pipe(
             prompt,
             image=init_image,
             mask_image=mask,
             num_inference_steps=num_inference_steps,
-            # strength=strength,
-            # guidance_scale=0.0,
         ).images[0]
 
         # face swap
         output = np.array(image)
-        source_face = self.face_app.get(np.array(init_image))[0]
+        source_face = self.face_app.get(np.array(temp_init_image))[0]  # try temp_init_image
         output_face = self.face_app.get(output)[0]
         face_result = self.face_swapper.get(output, output_face, source_face, paste_back=True)
         
 
 
         # face enhancer
+
         target_face = self.face_app.get(face_result)[0]
         face_result = self.enhance_face(target_face, face_result, self.face_enhancer_model)
         face_result = face_result.astype(np.uint8)
@@ -266,18 +318,18 @@ class Model:
 
 
         # upscale
-        inputs = ImageLoader.load_image(face_result)
-        preds = self.upscale_model(inputs)
-        pred = preds.data.cpu().numpy()
-        pred[0] = np.clip(pred[0], 0, 255)
-        pred = pred[0].transpose((1, 2, 0)) * 255.0
+        # inputs = ImageLoader.load_image(face_result)
+        # preds = self.upscale_model(inputs)
+        # pred = preds.data.cpu().numpy()
+        # pred[0] = np.clip(pred[0], 0, 255)
+        # pred = pred[0].transpose((1, 2, 0)) * 255.0
 
-        pred = pred.astype(np.uint8)
+        # pred = pred.astype(np.uint8)
 
-        result = PIL.Image.fromarray(pred)
+        # result = PIL.Image.fromarray(pred)
 
         byte_stream = BytesIO()
-        result.save(byte_stream, format="JPEG")
+        face_result.save(byte_stream, format="JPEG")
         image_bytes = byte_stream.getvalue()
 
         return image_bytes
@@ -312,7 +364,7 @@ web_image = Image.debian_slim().pip_install("jinja2")
 
 @stub.function(
     image=web_image,
-    allow_concurrent_inputs=20,
+    allow_concurrent_inputs=2,
 )
 @asgi_app()
 def app():
@@ -324,12 +376,17 @@ def app():
 
     web_app = FastAPI()
 
-    # Allow requests from all origins
+    # Allow requests from your frontend origin
+    origins = [
+        "https://professional-headshot.netlify.app",
+        "http://localhost:3000",
+    ]
+
     web_app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -344,9 +401,5 @@ def app():
 
 
         return StreamingResponse(BytesIO(output_image_bytes), media_type="image/png")
-
-
-
-
 
     return web_app
