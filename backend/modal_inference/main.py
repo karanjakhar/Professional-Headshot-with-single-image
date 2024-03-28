@@ -60,7 +60,7 @@ def load_models_concurrently(load_functions_map: dict) -> dict:
             model_id_to_model[future_to_model_id[future]] = future.result()
     return model_id_to_model
 
-@stub.cls(gpu=gpu.T4(), container_idle_timeout=1200)
+@stub.cls(gpu=gpu.T4(), container_idle_timeout=300)
 class Model:
     @build()
     def download_models(self):
