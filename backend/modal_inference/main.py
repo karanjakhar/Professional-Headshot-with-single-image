@@ -29,7 +29,7 @@ image = Image.debian_slim().apt_install("git").apt_install(
  'wget https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth -P /root/gfpgan/weights/'
  )
 
-stub = Stub("stable-diffusion-xl-turbo", image=image)
+stub = Stub("professional-headshot-single-image", image=image)
 
 with image.imports():
     import torch
